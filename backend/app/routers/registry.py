@@ -48,6 +48,12 @@ class RegistryRecordResponse(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
     record_version: str | None = None
+    # Whether a corresponding Loom DB agent row exists (keyed on
+    # registry_record_id). Populated for AGENT records so the catalog can show
+    # an "Imported" badge vs an "Import" button. None/False means not yet
+    # imported into Loom's operational store.
+    imported: bool = False
+    db_agent_id: int | None = None
 
 
 class RegistryRecordDetailResponse(RegistryRecordResponse):
@@ -170,11 +176,37 @@ def _to_str(val) -> str:
 
 def _from_record_type(record_type: str) -> str:
     """Map the AWS `recordType` enum (AGENT/MCP/SKILL/CUSTOM) back to Loom's
-    frontend-facing descriptor_type (A2A/MCP/...), preserving the existing
-    API contract for RegistryPage.tsx. Loom only ever creates AGENT- and
-    MCP-typed records today, so AGENT always means "A2A" (agent card) here.
+    frontend-facing descriptor_type (A2A/MCP/TOOL/...). Loom creates AGENT- and
+    MCP-typed records itself, so AGENT always means "A2A" (agent card) here.
+    CUSTOM records are the platform's tool-governance tools
+    (agenticai.tool-governance/*), surfaced in the catalog as "TOOL".
     """
-    return "A2A" if record_type == "AGENT" else record_type
+    if record_type == "AGENT":
+        return "A2A"
+    if record_type == "CUSTOM":
+        return "TOOL"
+    return record_type
+
+
+def _governance_description(rec: dict) -> str | None:
+    """For CUSTOM tool-governance records the human description lives inside
+    descriptors.custom.data (a JSON string of the agenticai.tool-governance
+    schema), not in the top-level `description`. Pull it out so TOOL cards are
+    not blank. Falls back to the top-level description for every other record
+    type, and never raises on a malformed/absent payload.
+    """
+    top = rec.get("description")
+    if top:
+        return top
+    try:
+        data = rec.get("descriptors", {}).get("custom", {}).get("data")
+        if isinstance(data, str) and data:
+            import json
+            parsed = json.loads(data)
+            return parsed.get("description") or None
+    except Exception:
+        pass
+    return top
 
 
 def _record_to_response(rec: dict) -> RegistryRecordResponse:
@@ -184,7 +216,7 @@ def _record_to_response(rec: dict) -> RegistryRecordResponse:
         name=rec.get("displayName", rec.get("name", "")),
         descriptor_type=_from_record_type(rec.get("recordType", "")),
         status=rec.get("status", ""),
-        description=rec.get("description"),
+        description=_governance_description(rec),
         created_at=_to_str(rec.get("createdAt")),
         updated_at=_to_str(rec.get("updatedAt")),
         record_version=rec.get("recordVersion"),
@@ -198,7 +230,7 @@ def _record_to_detail_response(rec: dict) -> RegistryRecordDetailResponse:
         name=rec.get("displayName", rec.get("name", "")),
         descriptor_type=_from_record_type(rec.get("recordType", "")),
         status=rec.get("status", ""),
-        description=rec.get("description"),
+        description=_governance_description(rec),
         created_at=_to_str(rec.get("createdAt")),
         updated_at=_to_str(rec.get("updatedAt")),
         descriptors=rec.get("descriptors", {}),
@@ -215,11 +247,23 @@ def list_records(
     status_filter: str | None = Query(None, alias="status", description="Filter by record status"),
     descriptor_type: str | None = Query(None, description="Filter by descriptor type"),
     user: UserInfo = Depends(require_scopes("registry:read")),
+    db: Session = Depends(get_db),
 ) -> list[RegistryRecordResponse]:
     """List all registry records, optionally filtered by status or descriptor type."""
     client = get_registry_client()
     response = _call_registry(client.list_records)
     records = response.get("registryRecords", [])
+
+    # Map registry_record_id -> DB agent id so each record can indicate whether
+    # it has a corresponding Loom operational row (the registry is the source of
+    # truth for "what exists"; the DB is the operational cache for "is it here").
+    imported_map: dict[str, int] = {
+        rid: aid
+        for rid, aid in db.query(Agent.registry_record_id, Agent.id)
+        .filter(Agent.registry_record_id.isnot(None))
+        .all()
+        if rid
+    }
 
     results: list[RegistryRecordResponse] = []
     for rec in records:
@@ -227,7 +271,12 @@ def list_records(
             continue
         if descriptor_type and _from_record_type(rec.get("recordType", "")) != descriptor_type:
             continue
-        results.append(_record_to_response(rec))
+        resp = _record_to_response(rec)
+        db_id = imported_map.get(resp.record_id)
+        if db_id is not None:
+            resp.imported = True
+            resp.db_agent_id = db_id
+        results.append(resp)
     return results
 
 

@@ -759,11 +759,11 @@ export function ChatPage({ userGroups, onLogout, viewAsUser, onExitViewAs }: Cha
             <img
               src={
                 isLightTheme(theme)
-                  ? "/assets/loom_light_alt.png"
-                  : "/assets/loom_dark_alt.png"
+                  ? "/assets/calanthir_light_alt.svg"
+                  : "/assets/calanthir_dark_alt.svg"
               }
-              alt="Loom"
-              className="h-15"
+              alt="Calanthir"
+              className="h-24"
             />
           </div>
 

@@ -28,7 +28,7 @@ import { listMcpServers } from "@/api/mcp";
 import { listA2aAgents } from "@/api/a2a";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
 import { listRegistryRecords } from "@/api/registry";
-import { fetchModels } from "@/api/agents";
+import { fetchModels, importRegistryAgent, reconcileRegistryAgents } from "@/api/agents";
 import { ApiError } from "@/api/client";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
 import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy, RegistryRecord, ModelOption } from "@/api/types";
@@ -183,6 +183,17 @@ export function CatalogPage({
   const [skillsSortDir, setSkillsSortDir] = useState<SortDirection>(() => loadSortDirection("catalog-skills"));
   const [skillsTableCol, setSkillsTableCol] = useState<string | null>("name");
   const [skillsTableDir, setSkillsTableDir] = useState<SortDirection>("asc");
+  const [toolsSortDir, setToolsSortDir] = useState<SortDirection>(() => loadSortDirection("catalog-tools"));
+  const [toolsTableCol, setToolsTableCol] = useState<string | null>("name");
+  const [toolsTableDir, setToolsTableDir] = useState<SortDirection>("asc");
+  const handleToolsTableSort = (col: string) => {
+    if (toolsTableCol === col) {
+      setToolsTableDir(toolsTableDir === "asc" ? "desc" : "asc");
+    } else {
+      setToolsTableCol(col);
+      setToolsTableDir("asc");
+    }
+  };
 
   const handleAgentTableSort = (col: string) => {
     if (agentTableCol === col) {
@@ -299,6 +310,109 @@ export function CatalogPage({
     void fetchSkillsData();
   }, [fetchSkillsData]);
 
+  // Tools data (CUSTOM tool-governance records of the bound Agent Registry,
+  // surfaced by the backend as descriptor_type "TOOL" — e.g. tool-ping/tool-echo).
+  const [toolRecords, setToolRecords] = useState<RegistryRecord[]>([]);
+  const [toolsLoading, setToolsLoading] = useState(true);
+
+  const fetchToolsData = useCallback(async () => {
+    if (!canViewSkills || !registryEnabled) {
+      setToolsLoading(false);
+      return;
+    }
+    try {
+      const data = await listRegistryRecords({ descriptorType: "TOOL" });
+      setToolRecords(data);
+    } catch {
+      // silently ignore
+    } finally {
+      setToolsLoading(false);
+    }
+  }, [canViewSkills, registryEnabled]);
+
+  useEffect(() => {
+    void fetchToolsData();
+  }, [fetchToolsData]);
+
+  // Registry Agents (AGENT records of the bound registry) — catalog view that
+  // supports importing into Loom's DB via an inline metadata form.
+  const [registryAgents, setRegistryAgents] = useState<RegistryRecord[]>([]);
+  const [registryAgentsLoading, setRegistryAgentsLoading] = useState(true);
+  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editArn, setEditArn] = useState("");
+  const [editRegion, setEditRegion] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const handleSyncRegistry = async () => {
+    setSyncing(true);
+    try {
+      const r = await reconcileRegistryAgents();
+      if (r.updated === 0 && r.missing === 0) {
+        toast.success(`In sync — ${r.checked} imported agent(s) checked, nothing changed`);
+      } else {
+        toast.success(`Synced: ${r.updated} updated, ${r.missing} missing, ${r.checked} checked`);
+      }
+      await fetchRegistryAgents();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Registry sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const fetchRegistryAgents = useCallback(async () => {
+    if (!registryEnabled) {
+      setRegistryAgentsLoading(false);
+      return;
+    }
+    try {
+      const data = await listRegistryRecords({ descriptorType: "A2A" });
+      setRegistryAgents(data);
+    } catch {
+      // silently ignore
+    } finally {
+      setRegistryAgentsLoading(false);
+    }
+  }, [registryEnabled]);
+
+  useEffect(() => {
+    void fetchRegistryAgents();
+  }, [fetchRegistryAgents]);
+
+  const startEditAgent = (rec: RegistryRecord) => {
+    setEditingAgentId(rec.record_id);
+    setEditName(rec.name);
+    setEditDescription(rec.description ?? "");
+    // The list record carries no runtime ARN (it lives in the detail
+    // descriptors); the user pastes the deployed AgentCore Runtime ARN here to
+    // make the imported agent invokable, else it imports as a draft.
+    setEditArn("");
+    setEditRegion("");
+  };
+
+  const saveImportAgent = async (rec: RegistryRecord) => {
+    setImporting(true);
+    try {
+      await importRegistryAgent({
+        registry_record_id: rec.record_id,
+        name: editName.trim() || rec.name,
+        description: editDescription,
+        arn: editArn.trim() || null,
+        region: editRegion.trim() || null,
+      });
+      toast.success(`Imported "${editName.trim() || rec.name}" into Loom`);
+      setEditingAgentId(null);
+      await fetchRegistryAgents();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Failed to import agent");
+    } finally {
+      setImporting(false);
+    }
+  };
+
   // Memory data
   const [memories, setMemories] = useState<MemoryResponse[]>([]);
   const [memoriesLoading, setMemoriesLoading] = useState(true);
@@ -397,7 +511,7 @@ export function CatalogPage({
         toast.success("Memory deletion initiated");
       } else {
         setMemories((prev) => prev.filter((m) => m.id !== id));
-        toast.success(deleteInAws ? "Memory resource deleted" : "Memory removed from Loom");
+        toast.success(deleteInAws ? "Memory resource deleted" : "Memory removed from Calanthir");
       }
     } catch (e) {
       toast.error(e instanceof ApiError ? e.detail : "Failed to delete memory");
@@ -1106,6 +1220,171 @@ export function CatalogPage({
                 ))}
               </TableBody>
             </Table>
+          </div>
+        ))}
+      </section>
+      )}
+
+      {/* Tools Section (CUSTOM tool-governance records of the bound Agent Registry) */}
+      {canViewSkills && registryEnabled && (
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <button type="button" className="flex items-center gap-1 text-sm font-medium hover:text-foreground/80" onClick={() => toggleSection("tools")}>
+            {collapsedSections.has("tools") ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            Tools
+          </button>
+          {!collapsedSections.has("tools") && <SortButton direction={toolsSortDir} onClick={() => setToolsSortDir(toggleSortDirection("catalog-tools", toolsSortDir))} />}
+        </div>
+
+        {!collapsedSections.has("tools") && (toolsLoading ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 2 }).map((_, i) => (
+              <Skeleton key={i} className="h-32" />
+            ))}
+          </div>
+        ) : toolRecords.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-8 text-center">
+            No tools published to the Agent Registry.
+          </p>
+        ) : viewMode === "cards" ? (
+          <SortableCardGrid
+            items={toolRecords}
+            getId={(s) => s.record_id}
+            getName={(s) => s.name}
+            storageKey="catalog-tools"
+            sortDirection={toolsSortDir}
+            onSortDirectionChange={(d) => { if (d) { setToolsSortDir(d); saveSortDirection("catalog-tools", d); } }}
+            renderItem={(tool) => (
+              <Card className="group relative flex h-full flex-col gap-3.5 py-4 transition-colors hover:bg-accent/50">
+                <CardHeader className="gap-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="min-w-0 flex-1 truncate font-mono text-sm font-medium tracking-tight" title={tool.name}>
+                      {tool.name}
+                    </CardTitle>
+                    <RegistryStatusBadge status={tool.status} />
+                  </div>
+                </CardHeader>
+                <CardContent className="flex flex-1 flex-col gap-3.5">
+                  <p className="text-xs text-muted-foreground line-clamp-3">{tool.description ?? "No description."}</p>
+                  <div className="mt-auto flex items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+                    <span>Updated {formatTimestamp(tool.updated_at, timezone)}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          />
+        ) : (
+          <div className="rounded-md border overflow-hidden">
+            <Table className="table-fixed">
+              <TableHeader>
+                <TableRow className="bg-card hover:bg-card">
+                  <SortableTableHead column="name" activeColumn={toolsTableCol} direction={toolsTableDir} onSort={handleToolsTableSort} className="w-[22%]">Name</SortableTableHead>
+                  <SortableTableHead column="description" activeColumn={toolsTableCol} direction={toolsTableDir} onSort={handleToolsTableSort} className="w-[48%]">Description</SortableTableHead>
+                  <SortableTableHead column="status" activeColumn={toolsTableCol} direction={toolsTableDir} onSort={handleToolsTableSort} className="w-[14%]">Status</SortableTableHead>
+                  <SortableTableHead column="updated" activeColumn={toolsTableCol} direction={toolsTableDir} onSort={handleToolsTableSort} className="w-[16%]">Updated</SortableTableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortRows(toolRecords, toolsTableCol, toolsTableDir, {
+                  name: (s) => s.name,
+                  description: (s) => s.description ?? "",
+                  status: (s) => s.status,
+                  updated: (s) => s.updated_at ?? "",
+                }).map((tool) => (
+                  <TableRow key={tool.record_id} className="bg-input-bg hover:bg-input-bg/80">
+                    <TableCell className="font-medium text-sm">{tool.name}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground truncate">{tool.description ?? "—"}</TableCell>
+                    <TableCell><RegistryStatusBadge status={tool.status} /></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {formatTimestamp(tool.updated_at, timezone)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ))}
+      </section>
+      )}
+
+      {/* Registry Agents Section (AGENT records of the bound registry; import into DB) */}
+      {registryEnabled && (
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <button type="button" className="flex items-center gap-1 text-sm font-medium hover:text-foreground/80" onClick={() => toggleSection("registry-agents")}>
+            {collapsedSections.has("registry-agents") ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            Registry Agents
+          </button>
+          <Button size="sm" variant="outline" disabled={syncing} onClick={() => void handleSyncRegistry()}>
+            {syncing ? "Syncing…" : "Sync"}
+          </Button>
+        </div>
+
+        {!collapsedSections.has("registry-agents") && (registryAgentsLoading ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 2 }).map((_, i) => (
+              <Skeleton key={i} className="h-32" />
+            ))}
+          </div>
+        ) : registryAgents.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-8 text-center">
+            No agents published to the registry.
+          </p>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {registryAgents.map((rec) => (
+              <Card key={rec.record_id} className="group relative flex h-full flex-col gap-3.5 py-4">
+                <CardHeader className="gap-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="min-w-0 flex-1 truncate font-mono text-sm font-medium tracking-tight" title={rec.name}>
+                      {rec.name}
+                    </CardTitle>
+                    <RegistryStatusBadge status={rec.status} />
+                  </div>
+                </CardHeader>
+                <CardContent className="flex flex-1 flex-col gap-3.5">
+                  {editingAgentId === rec.record_id ? (
+                    <div className="flex flex-col gap-2">
+                      <Input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Agent name" />
+                      <Input value={editDescription} onChange={(e) => setEditDescription(e.target.value)} placeholder="Description" />
+                      <Input value={editArn} onChange={(e) => setEditArn(e.target.value)} placeholder="Runtime ARN (optional — makes it invokable)" className="font-mono text-xs" />
+                      <Input value={editRegion} onChange={(e) => setEditRegion(e.target.value)} placeholder="Region (e.g. us-east-1)" className="font-mono text-xs" />
+                      <div className="flex items-center gap-2 pt-1">
+                        <Button size="sm" disabled={importing} onClick={() => void saveImportAgent(rec)}>
+                          {importing ? "Saving…" : "Save to Calanthir"}
+                        </Button>
+                        <Button size="sm" variant="ghost" disabled={importing} onClick={() => setEditingAgentId(null)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs text-muted-foreground line-clamp-3">{rec.description ?? "No description."}</p>
+                      <div className="flex items-center gap-1.5">
+                        {rec.imported ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                            ✓ Imported into Calanthir
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                            Not in Calanthir
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+                        <span>Updated {formatTimestamp(rec.updated_at, timezone)}</span>
+                        {rec.imported ? (
+                          <Button size="sm" variant="ghost" disabled>Imported</Button>
+                        ) : (
+                          <Button size="sm" variant="outline" onClick={() => startEditAgent(rec)}>Import</Button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
           </div>
         ))}
       </section>

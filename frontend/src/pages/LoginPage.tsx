@@ -106,14 +106,14 @@ export function LoginPage() {
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           <img
-            src="/assets/loom_dark_alt.png"
-            alt="Loom"
-            className="h-16 mx-auto dark:block hidden"
+            src="/assets/calanthir_dark_alt.svg"
+            alt="Calanthir"
+            className="h-36 mx-auto dark:block hidden"
           />
           <img
-            src="/assets/loom_light_alt.png"
-            alt="Loom"
-            className="h-16 mx-auto dark:hidden block"
+            src="/assets/calanthir_light_alt.svg"
+            alt="Calanthir"
+            className="h-36 mx-auto dark:hidden block"
           />
         </div>
 

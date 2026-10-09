@@ -1083,6 +1083,8 @@ export interface RegistryRecord {
   created_at: string | null;
   updated_at: string | null;
   record_version: string | null;
+  imported?: boolean;
+  db_agent_id?: number | null;
 }
 
 export interface RegistryRecordDetail extends RegistryRecord {

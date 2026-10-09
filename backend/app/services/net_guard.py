@@ -113,17 +113,32 @@ def _resolve_and_validate(hostname: str, *, allow_private: bool = False) -> str:
     except socket.gaierror as e:
         raise SSRFBlockedError(f"DNS resolution failed for {hostname!r}: {e}") from e
 
-    resolved_ips = {info[4][0] for info in infos}
-    if not resolved_ips:
+    # Preserve resolution order per family so we can prefer a connectable one.
+    # getaddrinfo may return both A (IPv4) and AAAA (IPv6) records; pinning an
+    # arbitrary one (e.g. an IPv6 address on an IPv4-only container network)
+    # fails at connect with [Errno 99] Cannot assign requested address. We
+    # validate ALL resolved addresses for SSRF (so none can slip through), then
+    # pin a usable one, preferring the family the host can actually reach.
+    ordered_ips: list[str] = []
+    for info in infos:
+        ip = info[4][0]
+        if ip not in ordered_ips:
+            ordered_ips.append(ip)
+    if not ordered_ips:
         raise SSRFBlockedError(f"No addresses resolved for {hostname!r}")
 
     is_disallowed = _is_always_disallowed_ip if allow_private else _is_disallowed_ip
-    for ip_str in resolved_ips:
+    for ip_str in ordered_ips:
         ip = ipaddress.ip_address(ip_str)
         if is_disallowed(ip):
             raise SSRFBlockedError(f"{hostname!r} resolves to disallowed address {ip_str}")
 
-    return next(iter(resolved_ips))
+    # Prefer IPv4 (always usable on the Docker bridge); fall back to the first
+    # resolved address if no IPv4 is present (IPv6-only environments).
+    def _family(ip_str: str) -> int:
+        return ipaddress.ip_address(ip_str).version
+    ipv4 = [ip for ip in ordered_ips if _family(ip) == 4]
+    return ipv4[0] if ipv4 else ordered_ips[0]
 
 
 def _validate_url(url: str, *, require_https: bool, allow_private: bool) -> tuple[urllib.parse.ParseResult, str]:

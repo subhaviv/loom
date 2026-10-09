@@ -177,7 +177,7 @@ export function AgentListPage({
       <div className="flex items-start justify-between">
         <div>
           <h2 className="text-lg font-semibold">Agent Administration</h2>
-          <p className="text-sm text-muted-foreground">Deploy new agents or import existing ones.</p>
+          <p className="text-sm text-muted-foreground">{readOnly ? "View and manage agents imported from the registry." : "Deploy new agents or import existing ones."}</p>
         </div>
         <ViewModeToggle viewMode={viewMode} onViewModeChange={onViewModeChange} />
       </div>
@@ -187,7 +187,9 @@ export function AgentListPage({
           <div>
             <h3 className="text-sm font-medium">Agents</h3>
             <p className="text-xs text-muted-foreground mt-1 whitespace-pre-line">
-              {"An agent can be deployed directly from here.\nAn agent that was previously created can also be imported here."}
+              {readOnly
+                ? "Agents are published through the platform pipeline and discovered in the registry. Import a registry agent to manage it here."
+                : "An agent can be deployed directly from here.\nAn agent that was previously created can also be imported here."}
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-4">

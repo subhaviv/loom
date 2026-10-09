@@ -340,7 +340,7 @@ export function MemoryManagementPanel({ viewMode, readOnly, groupRestriction, ow
       } else {
         // Immediately removed (local-only, FAILED state, or no AWS ID)
         setMemories((prev) => prev.filter((m) => m.id !== id));
-        toast.success(deleteInAws ? "Memory resource deleted" : "Memory removed from Loom");
+        toast.success(deleteInAws ? "Memory resource deleted" : "Memory removed from Calanthir");
       }
     } catch (e) {
       toast.error(parseApiError(e));

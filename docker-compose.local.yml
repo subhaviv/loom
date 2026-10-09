@@ -1,0 +1,99 @@
+# Local Docker Compose for Loom (Phase-1 equivalent of `make run` + `make dev`).
+#
+# Reuses the repo's EXISTING Dockerfiles unchanged:
+#   backend/Dockerfile   — build context is the REPO ROOT (it copies backend/ + agents/)
+#   frontend/Dockerfile  — build context is frontend/ (multi-stage node build -> nginx)
+#
+# Config is injected from this session's resolved values (shared/etc/outputs.sh +
+# common.sh + backend/etc/environment.sh), NOT the $(O_*) tokens, because compose
+# does not run the shell substitution that `source environment.sh` does.
+#
+# AWS: the backend uses an ambient boto3.Session() (no assume-role), so it needs
+# the agentops-publisher credentials. We mount ~/.aws read-only and pass the
+# profile. Registry reads (thx22kgS5M7oTMy7) go through this.
+#
+# Frontend note: VITE_* are BUILD-TIME args baked into the SPA, and nginx.conf
+# does NOT proxy /api — the browser calls the backend directly, so the API base
+# URL must be the host-reachable backend address.
+#
+# Run:   docker compose -f docker-compose.local.yml up --build
+# Stop:  docker compose -f docker-compose.local.yml down
+# Login: http://localhost:5173  (admin / LoomDemo2026!)
+
+services:
+  # One-shot: make the named DB volume writable by appuser (uid 999) before the
+  # backend (which runs as appuser and cannot chown) starts. A fresh named volume
+  # mounts root-owned, which is why the SQLite open failed.
+  db-init:
+    image: public.ecr.aws/docker/library/busybox:latest
+    command: ["sh", "-c", "mkdir -p /home/appuser/data && chown -R 999:999 /home/appuser/data"]
+    volumes:
+      - loom-db:/home/appuser/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: loom-backend:local
+    # This Docker bridge has no routable IPv6, but Cognito's JWKS host resolves to
+    # BOTH A and AAAA. The JWT validator uses plain urllib, which tries the AAAA
+    # address first and dies with [Errno 101] Network is unreachable (no v4 fallback,
+    # unlike botocore). Disabling IPv6 in the container forces getaddrinfo to return
+    # only A records, so token validation (and any other urllib egress) uses IPv4.
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      LOG_LEVEL: info
+      AWS_PROFILE: loom-user
+      AWS_REGION: us-east-1
+      LOOM_DATABASE_URL: sqlite:////home/appuser/data/loom.db
+      LOOM_BACKEND_PORT: "8000"
+      LOOM_COGNITO_USER_POOL_ID: us-east-1_NoErXe1QA
+      LOOM_COGNITO_USER_CLIENT_ID: 3o0q6hdtfo1sphqq7jtqaspb3f
+      LOOM_COGNITO_REGION: us-east-1
+      LOOM_ARTIFACT_BUCKET: loom-sam-deployments-195698601974-us-east-1
+      LOOM_ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
+      # The whole point of this session: GA agent-registry, blueprint-created.
+      LOOM_REGISTRY_ID: thx22kgS5M7oTMy7
+    volumes:
+      # Ambient AWS creds for boto3 (read-only). The container reads the
+      # agentops-publisher profile from here.
+      - ${HOME}/.aws:/home/appuser/.aws:ro
+      # Persist the SQLite DB across restarts (chowned by db-init above).
+      - loom-db:/home/appuser/data
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Browser calls the backend directly (nginx does NOT proxy /api), so
+        # this must be the host-reachable backend URL, baked at build time.
+        VITE_API_BASE_URL: "http://localhost:8000"
+        VITE_COGNITO_USER_CLIENT_ID: "3o0q6hdtfo1sphqq7jtqaspb3f"
+        # Demo: hide Loom's own agent-creation path (Loom = discovery/import
+        # storefront; the platform pipeline is the paved road that creates agents).
+        # Set back to "true" to re-enable self-service creation in Loom.
+        VITE_LOOM_AGENT_CREATION_ENABLED: "false"
+    image: loom-frontend:local
+    ports:
+      # host 5173 -> container nginx 8000
+      - "127.0.0.1:5173:8000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  loom-db:

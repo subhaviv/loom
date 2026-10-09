@@ -21,3 +21,4 @@ outputs*.sh
 loom.db
 notes.md
 *_output.yaml
+frontend/package-lock.json

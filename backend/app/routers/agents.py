@@ -274,6 +274,21 @@ class AgentUpdateRequest(BaseModel):
     api_key: str | None = Field(None, description="Provider API key, write-only — stored in Secrets Manager and never returned")
 
 
+class RegistryAgentImportRequest(BaseModel):
+    """Import (upsert) a registry AGENT record into Loom's DB from the catalog
+    screen. Metadata the user filled in on the screen is carried here; the row
+    is keyed on registry_record_id so re-importing updates in place. When the
+    registry descriptor carries a deployed runtime ARN we store it so the agent
+    is immediately invokable; otherwise the row is a catalog draft until deployed.
+    """
+    registry_record_id: str = Field(..., description="Registry record id this agent is imported from")
+    name: str = Field(..., description="Agent name")
+    description: str = Field(default="", description="Human-readable description")
+    arn: str | None = Field(None, description="Deployed AgentCore Runtime ARN, if the registry record references one")
+    region: str | None = Field(None, description="AWS region (defaults to the deployment region)")
+    tags: dict[str, str] | None = Field(None, description="Resolved tag values")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -922,6 +937,143 @@ def create_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid source: {request.source}. Must be 'register', 'deploy', or 'harness'."
         )
+
+
+@router.post("/import-registry", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+def import_registry_agent(
+    request: RegistryAgentImportRequest,
+    user: UserInfo = Depends(require_scopes("agent:write")),
+    db: Session = Depends(get_db),
+) -> AgentResponse:
+    """Upsert a registry AGENT record into Loom's DB from the catalog screen.
+
+    Keyed on registry_record_id: re-importing the same record updates the row in
+    place. If the registry descriptor carries a deployed runtime ARN we parse it
+    so the agent is immediately invokable; otherwise the row is a catalog draft
+    (source='registry') with empty runtime fields, deployable later.
+    """
+    agent = (
+        db.query(Agent)
+        .filter(Agent.registry_record_id == request.registry_record_id)
+        .first()
+    )
+    created = agent is None
+
+    region = request.region or "us-east-1"
+    account_id = ""
+    runtime_id = ""
+    arn = request.arn or ""
+    if arn:
+        try:
+            region, account_id, runtime_id = parse_arn(arn)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if agent is None:
+        agent = Agent(
+            arn=arn or f"registry:{request.registry_record_id}",
+            runtime_id=runtime_id,
+            region=region,
+            account_id=account_id,
+            source="registry",
+            registered_at=datetime.utcnow(),
+        )
+        db.add(agent)
+
+    # Metadata from the screen
+    agent.name = request.name
+    agent.description = request.description or None
+    agent.registry_record_id = request.registry_record_id
+    agent.registry_status = "APPROVED"
+    agent.last_refreshed_at = datetime.utcnow()
+    if request.tags is not None:
+        agent.set_tags(request.tags)
+    if arn:
+        agent.arn = arn
+        agent.runtime_id = runtime_id
+        agent.deployment_status = "deployed"
+    else:
+        agent.deployment_status = agent.deployment_status or "draft"
+
+    db.commit()
+    db.refresh(agent)
+    logger.info(
+        "%s registry agent import: record=%s id=%s runnable=%s",
+        "Created" if created else "Updated",
+        request.registry_record_id, agent.id, bool(arn),
+    )
+    return _agent_response(agent, db)
+
+
+class RegistryReconcileResponse(BaseModel):
+    """Summary of a registry -> DB reconciliation pass."""
+    checked: int = 0
+    updated: int = 0
+    missing: int = 0
+    details: list[str] = Field(default_factory=list)
+
+
+@router.post("/reconcile-registry", response_model=RegistryReconcileResponse)
+def reconcile_registry_agents(
+    user: UserInfo = Depends(require_scopes("agent:write")),
+    db: Session = Depends(get_db),
+) -> RegistryReconcileResponse:
+    """Reconcile imported agents against the registry (source of truth).
+
+    Walks every DB agent that was imported from the registry (has a
+    registry_record_id) and refreshes its cached catalog fields — name,
+    description, status — from the live registry record. Operational state
+    (endpoint status, sessions, runtime) is left untouched: that is the DB's
+    own, not the registry's. A DB row whose registry record no longer exists is
+    flagged registry_status='MISSING' so the drift is visible rather than silent.
+    """
+    from app.services.registry import get_registry_client
+
+    agents = (
+        db.query(Agent)
+        .filter(Agent.registry_record_id.isnot(None))
+        .all()
+    )
+    result = RegistryReconcileResponse(checked=len(agents))
+    if not agents:
+        return result
+
+    client = get_registry_client()
+    try:
+        resp = client.list_records()
+        records = {r.get("recordId") or r.get("registryRecordId"): r
+                   for r in resp.get("registryRecords", [])}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Registry list failed: {e}")
+
+    for agent in agents:
+        rec = records.get(agent.registry_record_id)
+        if rec is None:
+            if agent.registry_status != "MISSING":
+                agent.registry_status = "MISSING"
+                result.missing += 1
+                result.details.append(f"{agent.name}: registry record gone -> MISSING")
+            continue
+        changed = False
+        new_name = rec.get("name") or rec.get("displayName")
+        new_desc = rec.get("description")
+        new_status = rec.get("status")
+        if new_name and new_name != agent.name:
+            agent.name = new_name; changed = True
+        if new_desc is not None and new_desc != agent.description:
+            agent.description = new_desc or None; changed = True
+        if new_status and new_status != agent.registry_status:
+            agent.registry_status = new_status; changed = True
+        if changed:
+            agent.last_refreshed_at = datetime.utcnow()
+            result.updated += 1
+            result.details.append(f"{agent.name}: refreshed from registry")
+
+    db.commit()
+    logger.info("Registry reconcile: checked=%s updated=%s missing=%s",
+                result.checked, result.updated, result.missing)
+    return result
 
 
 def _register_agent(request: AgentCreateRequest, db: Session) -> AgentResponse:

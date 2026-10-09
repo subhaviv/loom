@@ -443,7 +443,7 @@ export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProvi
       <div className="space-y-2">
         <Label className="text-xs">Group Mappings</Label>
         <p className="text-[10px] text-muted-foreground">
-          Map each Loom group to the value your IdP sends in the{" "}
+          Map each Calanthir group to the value your IdP sends in the{" "}
           <span className="font-mono">{formGroupClaimPath || GROUP_CLAIM_HINTS[formProviderType] || "groups"}</span>{" "}
           claim. A provider with no mappings grants no scopes, so leaving these blank will lock out
           anyone who signs in through it.
@@ -497,7 +497,7 @@ export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProvi
               {activeProvider.name} is the active provider
             </span>
           ) : (
-            <span className="font-mono text-[11px] text-muted-foreground">No external provider is active — Loom uses Cognito.</span>
+            <span className="font-mono text-[11px] text-muted-foreground">No external provider is active — Calanthir uses Cognito.</span>
           )}
           <span className="text-[12.5px] text-muted-foreground">Only one provider can be active at a time. Activating another signs out federated sessions.</span>
           <span className="ml-auto shrink-0 font-mono text-[11.5px] text-muted-foreground">{providers.length} provider{providers.length === 1 ? "" : "s"}</span>
@@ -518,7 +518,7 @@ export function IdentityProviderPanel({ readOnly, onCountChange }: IdentityProvi
       )}
 
       {providers.length === 0 && !showForm && (
-        <p className="text-sm text-muted-foreground py-8">No identity providers configured. Loom uses Cognito for authentication.</p>
+        <p className="text-sm text-muted-foreground py-8">No identity providers configured. Calanthir uses Cognito for authentication.</p>
       )}
 
       <div className="flex flex-col gap-3">

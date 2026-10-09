@@ -286,8 +286,8 @@ export function AgentCard({ agent, onSelect, onDelete, onEdit, readOnly, deleteS
         title="Remove agent"
         description={
           showCleanupOption
-            ? `Remove agent "${agent.name ?? agent.runtime_id}" from Loom and delete it from AgentCore? This cannot be undone.`
-            : `Remove agent "${agent.name ?? agent.runtime_id}" from Loom? This cannot be undone.`
+            ? `Remove agent "${agent.name ?? agent.runtime_id}" from Calanthir and delete it from AgentCore? This cannot be undone.`
+            : `Remove agent "${agent.name ?? agent.runtime_id}" from Calanthir? This cannot be undone.`
         }
         confirmLabel="Confirm"
         onConfirm={() => {

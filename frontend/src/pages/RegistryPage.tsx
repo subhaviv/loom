@@ -248,7 +248,7 @@ function DescriptorView({ descriptors, descriptorType, metadataSlot }: { descrip
 
           {loomMeta && (
             <div>
-              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70 mb-1">Loom Metadata</div>
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70 mb-1">Calanthir Metadata</div>
               <div className="rounded border bg-input-bg p-3 space-y-0.5">
                 {Object.entries(loomMeta).map(([k, v]) => (
                   <div key={k}>{k}: <span className="text-foreground">{String(v)}</span></div>

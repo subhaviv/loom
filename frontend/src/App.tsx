@@ -275,6 +275,13 @@ function AppContent() {
     [viewAsUser, hasScope],
   );
 
+  // Demo/config toggle: when VITE_LOOM_AGENT_CREATION_ENABLED is explicitly
+  // "false", Loom hides its own agent-creation path (Add Agent / deploy),
+  // positioning Loom as a discovery+import storefront over the platform's
+  // paved-road pipeline. Defaults to enabled when the var is unset.
+  const agentCreationEnabled =
+    (import.meta.env.VITE_LOOM_AGENT_CREATION_ENABLED ?? "true").toString().toLowerCase() !== "false";
+
   // Compute group restriction for resource filtering.
   // Admins (t-admin): no restriction (see all resources including untagged)
   // Users (t-user): extract group tag from first g-users-* group
@@ -527,9 +534,9 @@ function AppContent() {
       <aside className="w-56 border-r bg-card flex flex-col shrink-0 h-screen overflow-y-auto">
         <div className="p-4 border-b">
           <img
-            src={isLightTheme(theme) ? "/assets/loom_light_alt.png" : "/assets/loom_dark_alt.png"}
-            alt="Loom"
-            className="h-15"
+            src={isLightTheme(theme) ? "/assets/calanthir_light_alt.svg" : "/assets/calanthir_dark_alt.svg"}
+            alt="Calanthir"
+            className="h-24 mx-auto"
           />
         </div>
         <nav className="flex-1 p-2 space-y-3">
@@ -709,7 +716,7 @@ function AppContent() {
               onSelectAgent={(id) => { handleSelectAgent(id); setActivePersona("builder"); }}
               onRefreshAgent={refreshAgent}
               onDelete={handleDelete}
-              readOnly={!effectiveHasScope("agent:write")}
+              readOnly={!effectiveHasScope("agent:write") || !agentCreationEnabled}
               agentDeleteStartTimes={deleteStartTimes}
               canViewAgents={effectiveHasScope("agent:read")}
               canViewMemories={effectiveHasScope("memory:read")}
@@ -738,7 +745,7 @@ function AppContent() {
                   onSelectAgent={handleSelectAgent}
                   onRefreshAgent={refreshAgent}
                   onDelete={handleDelete}
-                  readOnly={!effectiveHasScope("agent:write")}
+                  readOnly={!effectiveHasScope("agent:write") || !agentCreationEnabled}
                   groupRestriction={groupRestriction}
                   ownerRestriction={ownerRestriction}
                   deleteStartTimes={deleteStartTimes}

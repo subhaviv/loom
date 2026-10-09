@@ -17,6 +17,39 @@ export function listAgents(): Promise<AgentResponse[]> {
   return apiFetch<AgentResponse[]>("/api/agents");
 }
 
+export interface RegistryAgentImportRequest {
+  registry_record_id: string;
+  name: string;
+  description?: string;
+  arn?: string | null;
+  region?: string | null;
+  tags?: Record<string, string> | null;
+}
+
+/** Upsert a registry AGENT record into Loom's DB from the catalog screen. */
+export function importRegistryAgent(
+  request: RegistryAgentImportRequest,
+): Promise<AgentResponse> {
+  return apiFetch<AgentResponse>("/api/agents/import-registry", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export interface RegistryReconcileResult {
+  checked: number;
+  updated: number;
+  missing: number;
+  details: string[];
+}
+
+/** Reconcile imported agents against the registry (refresh cached fields). */
+export function reconcileRegistryAgents(): Promise<RegistryReconcileResult> {
+  return apiFetch<RegistryReconcileResult>("/api/agents/reconcile-registry", {
+    method: "POST",
+  });
+}
+
 export function getAgent(id: number): Promise<AgentResponse> {
   return apiFetch<AgentResponse>(`/api/agents/${id}`);
 }

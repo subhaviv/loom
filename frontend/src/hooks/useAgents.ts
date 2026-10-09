@@ -241,7 +241,7 @@ export function useAgents() {
       } else {
         // Immediately removed (local-only or no runtime)
         setAgents((prev) => prev.filter((a) => a.id !== id));
-        toast.success(cleanupAws ? "Agent deleted" : "Agent removed from Loom");
+        toast.success(cleanupAws ? "Agent deleted" : "Agent removed from Calanthir");
       }
     },
     [],
