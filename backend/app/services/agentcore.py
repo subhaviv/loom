@@ -119,7 +119,17 @@ def invoke_agent(
     from botocore import UNSIGNED
     from botocore.config import Config
 
-    payload: dict[str, Any] = {"prompt": prompt, "session_id": session_id, "actor_id": actor_id or "loom-agent"}
+    # Send BOTH payload shapes so one call works for either agent style:
+    #   - "prompt": consumed by Loom-native (strands/adk) handlers
+    #   - "messages": consumed by AG-UI / CopilotKit agents (which ignore
+    #     "prompt" and reply with a canned greeting if only prompt is sent)
+    # Each handler reads the key it understands and ignores the other.
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "messages": [{"role": "user", "content": prompt}] if prompt else [],
+        "session_id": session_id,
+        "actor_id": actor_id or "loom-agent",
+    }
     if interrupt_response:
         payload["interruptResponse"] = interrupt_response
     if dynamic_mcp_servers:
@@ -197,6 +207,37 @@ def invoke_agent(
         try:
             parsed = json.loads(payload)
             if isinstance(parsed, dict):
+                # AG-UI / CopilotKit protocol frames (some agents stream these
+                # instead of Loom's native {data|delta|tool_use} shape): the
+                # frame carries a "type" discriminator like RUN_STARTED,
+                # TEXT_MESSAGE_CONTENT, RUN_FINISHED. Translate the ones that
+                # carry user-visible text into Loom's {"type":"text"} shape so
+                # the existing chunk pipeline renders them; drop the lifecycle
+                # frames. Non-AG-UI dicts fall through unchanged.
+                agui_type = parsed.get("type")
+                if agui_type in (
+                    "TEXT_MESSAGE_CONTENT",
+                    "TEXT_MESSAGE_DELTA",
+                    "TEXT_MESSAGE_CHUNK",
+                ):
+                    text_delta = parsed.get("delta") or parsed.get("content") or ""
+                    if text_delta:
+                        yield {"type": "text", "content": text_delta}
+                    continue
+                if agui_type in (
+                    "RUN_STARTED",
+                    "RUN_FINISHED",
+                    "RUN_ERROR",
+                    "TEXT_MESSAGE_START",
+                    "TEXT_MESSAGE_END",
+                    "STEP_STARTED",
+                    "STEP_FINISHED",
+                ):
+                    # Lifecycle/control frames: no user-visible text to emit.
+                    if agui_type == "RUN_ERROR":
+                        err = parsed.get("message") or parsed.get("error") or "run error"
+                        yield {"type": "text", "content": f"\n\nError: {err}"}
+                    continue
                 yield {"type": "structured", "content": parsed}
             elif isinstance(parsed, str) and parsed:
                 yield {"type": "text", "content": parsed}
