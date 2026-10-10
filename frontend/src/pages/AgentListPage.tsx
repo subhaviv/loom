@@ -14,7 +14,6 @@ import {
 import { MultiSelect } from "@/components/ui/multi-select";
 import { AddFilterDropdown } from "@/components/ui/add-filter-dropdown";
 import { AgentRegistrationForm } from "@/components/AgentRegistrationForm";
-import { AgentWizardChooser } from "@/components/AgentWizardChooser";
 import { AgentCard } from "@/components/AgentCard";
 import { ViewModeToggle } from "@/components/ViewModeToggle";
 import { StatusPill } from "@/components/StatusPill";
@@ -29,7 +28,7 @@ import { statusVariant } from "@/lib/status";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
 import { fetchModels } from "@/api/agents";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
-import type { AgentDeployRequest, AgentHarnessDeployRequest, AgentResponse, ModelOption, TagPolicy } from "@/api/types";
+import type { AgentResponse, ModelOption, TagPolicy } from "@/api/types";
 
 type WizardStage = "closed" | "chooser" | "guided" | "register";
 
@@ -39,8 +38,6 @@ interface AgentListPageProps {
   viewMode: "cards" | "table";
   onViewModeChange: (mode: "cards" | "table") => void;
   onRegister: (arn: string, modelId?: string) => Promise<unknown>;
-  onDeploy?: (request: AgentDeployRequest, existingAgentId?: number) => Promise<unknown>;
-  onDeployHarness?: (request: AgentHarnessDeployRequest, existingAgentId?: number) => Promise<unknown>;
   onSelectAgent: (id: number) => void;
   onRefreshAgent: (id: number) => void;
   onDelete: (id: number, cleanupAws: boolean) => void;
@@ -58,8 +55,6 @@ export function AgentListPage({
   viewMode,
   onViewModeChange,
   onRegister,
-  onDeploy,
-  onDeployHarness,
   onSelectAgent,
   onRefreshAgent: _onRefreshAgent,
   onDelete,
@@ -71,11 +66,9 @@ export function AgentListPage({
   userGroups = [],
 }: AgentListPageProps) {
   const { timezone } = useTimezone();
-  const { user, browserSessionId, hasScope } = useAuth();
+  const { user, browserSessionId } = useAuth();
   const [submitting, setSubmitting] = useState(false);
   const [wizardStage, setWizardStage] = useState<WizardStage>("closed");
-  const [exportAgentId, setExportAgentId] = useState<number | undefined>(undefined);
-  const [pendingImportJson, setPendingImportJson] = useState<string | undefined>(undefined);
   const [tagPolicies, setTagPolicies] = useState<TagPolicy[]>([]);
   const [tagFilters, setTagFilters] = useState<Record<string, string[]>>(() => {
     try { return JSON.parse(localStorage.getItem("loom:tagFilters:agents") || "{}") as Record<string, string[]>; } catch { return {}; }
@@ -127,12 +120,6 @@ export function AgentListPage({
       });
     })
     .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction)
-    .filter(agent => {
-      // Non-admin users only see agents explicitly enabled for demo.
-      const isAdmin = userGroups.includes("t-admin");
-      if (isAdmin) return true;
-      return agent.tags?.["loom:demo"] === "true";
-    })
     .filter(agent => nameSearch.trim() === "" || (agent.name ?? agent.runtime_id ?? "").toLowerCase().includes(nameSearch.trim().toLowerCase()));
   const maxAgentCost = Math.max(0, ...filteredAgents.map(a => a.cost_summary?.total_cost ?? 0));
 
@@ -150,40 +137,12 @@ export function AgentListPage({
     }
   };
 
-  const handleDeploy = async (request: AgentDeployRequest) => {
-    if (!onDeploy) return;
-    const action = exportAgentId ? "update_deploy" : "deploy";
-    if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, 'agent', action, request.name);
-    setWizardStage("closed");
-    try {
-      await onDeploy(request, exportAgentId);
-      setExportAgentId(undefined);
-      toast.success(exportAgentId ? "Agent update started" : "Agent deployment started");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Deployment failed");
-    }
-  };
-
-  const handleDeployHarness = async (request: AgentHarnessDeployRequest) => {
-    if (!onDeployHarness) return;
-    const action = exportAgentId ? "update_harness" : "deploy_harness";
-    if (user && browserSessionId) trackAction(user.username ?? user.sub, browserSessionId, 'agent', action, request.name);
-    setWizardStage("closed");
-    try {
-      await onDeployHarness(request, exportAgentId);
-      setExportAgentId(undefined);
-      toast.success(exportAgentId ? "Agent update started" : "Harness deployment started");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Deployment failed");
-    }
-  };
-
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between">
         <div>
           <h2 className="text-lg font-semibold">Agent Administration</h2>
-          <p className="text-sm text-muted-foreground">{readOnly ? "View and manage agents imported from the registry." : "Deploy new agents or import existing ones."}</p>
+          <p className="text-sm text-muted-foreground">View and manage agents. Import from the registry or register by ARN.</p>
         </div>
         <ViewModeToggle viewMode={viewMode} onViewModeChange={onViewModeChange} />
       </div>
@@ -192,17 +151,15 @@ export function AgentListPage({
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-medium">Agents</h3>
-            <p className="text-xs text-muted-foreground mt-1 whitespace-pre-line">
-              {readOnly
-                ? "Agents are published through the platform pipeline and discovered in the registry. Import a registry agent to manage it here."
-                : "An agent can be deployed directly from here.\nAn agent that was previously created can also be imported here."}
+            <p className="text-xs text-muted-foreground mt-1">
+              Agents are discovered via the registry. You can also register an existing agent by ARN.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-4">
             <SortButton direction={agentSortDir} onClick={() => setAgentSortDir(toggleSortDirection("builder-agents", agentSortDir))} />
             <Button
               size="sm"
-              onClick={() => setWizardStage(wizardStage === "closed" ? "chooser" : "closed")}
+              onClick={() => setWizardStage(wizardStage === "closed" ? "register" : "closed")}
               disabled={readOnly}
             >
               <Plus className="h-3.5 w-3.5 mr-1" />
@@ -211,46 +168,13 @@ export function AgentListPage({
           </div>
         </div>
 
-        {/* R1: chooser between the guided wizard and manifest import. */}
-        {wizardStage === "chooser" && (
-          <Card className="p-4">
-            <AgentWizardChooser
-              onGuided={() => setWizardStage("guided")}
-              onImport={(json) => { setPendingImportJson(json); setWizardStage("guided"); }}
-              onRegisterArn={() => setWizardStage("register")}
-            />
-          </Card>
-        )}
-
-        {/* R2-R9: the guided wizard, which also renders the shared review/deploy step (R7) when
-            editing an existing agent or after a manifest import. */}
-        {wizardStage === "guided" && (
-          <Card className="gap-0 py-0">
-            <div className="p-4">
-              <AgentRegistrationForm
-                mode="deploy"
-                onRegister={handleRegister}
-                onDeploy={onDeploy ? handleDeploy : undefined}
-                onDeployHarness={onDeployHarness ? handleDeployHarness : undefined}
-                isLoading={submitting}
-                groupRestriction={groupRestriction}
-                ownerRestriction={ownerRestriction}
-                exportAgentId={exportAgentId}
-                pendingImportJson={pendingImportJson}
-                onImportConsumed={() => setPendingImportJson(undefined)}
-                onCancel={() => { setWizardStage("closed"); setExportAgentId(undefined); setPendingImportJson(undefined); }}
-              />
-            </div>
-          </Card>
-        )}
-
-        {/* Legacy escape hatch: attach an existing AgentCore runtime by ARN. */}
+        {/* Register an existing AgentCore runtime by ARN. */}
         {wizardStage === "register" && (
           <Card className="gap-0 py-0">
             <div className="p-4 space-y-3">
               <button
                 type="button"
-                onClick={() => setWizardStage("chooser")}
+                onClick={() => setWizardStage("closed")}
                 className="text-xs text-muted-foreground hover:text-foreground hover:underline"
               >
                 &larr; Back
@@ -388,7 +312,7 @@ export function AgentListPage({
                     agent={agent}
                     onSelect={onSelectAgent}
                     onDelete={onDelete}
-                    onEdit={hasScope("admin:write") ? (id) => { setExportAgentId(id); setWizardStage("guided"); } : undefined}
+                    onEdit={undefined}
                     readOnly={readOnly}
                     deleteStartTime={deleteStartTimes?.[agent.id]}
                     updateStartTime={updateStartTimes?.[agent.id]}

@@ -1,31 +1,52 @@
-import { useState } from "react";
-import { toast } from "sonner";
+import { useState, useEffect } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { patchAgent } from "@/api/agents";
+import { useAuth } from "@/contexts/AuthContext";
 import type { AgentResponse } from "@/api/types";
+
+const STORAGE_KEY = (username: string) => `calanthir:demo-visibility:${username}`;
+
+export function loadDemoVisibility(username: string): Set<number> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY(username));
+    if (!raw) return new Set();
+    return new Set(JSON.parse(raw) as number[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDemoVisibility(username: string, enabled: Set<number>) {
+  localStorage.setItem(STORAGE_KEY(username), JSON.stringify([...enabled]));
+}
 
 interface DemoConfigPageProps {
   agents: AgentResponse[];
   loading: boolean;
-  onRefreshAgent: (id: number) => void;
+  onVisibilityChange?: (enabled: Set<number>) => void;
 }
 
-export function DemoConfigPage({ agents, loading, onRefreshAgent }: DemoConfigPageProps) {
-  const [toggling, setToggling] = useState<Set<number>>(new Set());
+export function DemoConfigPage({ agents, loading, onVisibilityChange }: DemoConfigPageProps) {
+  const { user } = useAuth();
+  const username = user?.username ?? user?.sub ?? "anonymous";
 
-  const isDemoEnabled = (agent: AgentResponse) => agent.tags?.["loom:demo"] === "true";
+  const [enabled, setEnabled] = useState<Set<number>>(() => loadDemoVisibility(username));
 
-  const handleToggle = async (agent: AgentResponse, enabled: boolean) => {
-    setToggling((prev) => new Set(prev).add(agent.id));
-    try {
-      await patchAgent(agent.id, { tags: { ...agent.tags, "loom:demo": enabled ? "true" : "false" } });
-      onRefreshAgent(agent.id);
-      toast.success(`"${agent.name ?? agent.runtime_id}" ${enabled ? "enabled" : "disabled"} for demo`);
-    } catch {
-      toast.error("Failed to update demo visibility");
-    } finally {
-      setToggling((prev) => { const s = new Set(prev); s.delete(agent.id); return s; });
-    }
+  // Re-load if user changes
+  useEffect(() => {
+    const ids = loadDemoVisibility(username);
+    setEnabled(ids);
+    onVisibilityChange?.(ids);
+  }, [username]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggle = (id: number) => {
+    setEnabled((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      saveDemoVisibility(username, next);
+      onVisibilityChange?.(next);
+      return next;
+    });
   };
 
   return (
@@ -33,7 +54,7 @@ export function DemoConfigPage({ agents, loading, onRefreshAgent }: DemoConfigPa
       <div>
         <h2 className="text-lg font-semibold">Demo Visibility</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Toggle which agents are visible to demo users. Only enabled agents appear when a demo user logs in.
+          Choose which agents appear in your view. Preferences are saved locally in this browser.
         </p>
       </div>
 
@@ -47,47 +68,39 @@ export function DemoConfigPage({ agents, loading, onRefreshAgent }: DemoConfigPa
         ) : agents.length === 0 ? (
           <p className="text-sm text-muted-foreground py-10 text-center">No agents registered.</p>
         ) : (
-          <table className="w-full text-sm">
+          <table className="w-full table-fixed text-sm">
             <thead>
               <tr className="bg-card border-b">
-                <th className="text-left px-4 py-2.5 font-medium text-muted-foreground w-[55%]">Agent</th>
-                <th className="text-left px-4 py-2.5 font-medium text-muted-foreground w-[25%]">Status</th>
-                <th className="text-right px-4 py-2.5 font-medium text-muted-foreground w-[20%]">Demo Visible</th>
+                <th className="text-left px-4 py-2.5 font-medium text-muted-foreground w-[40%]">Agent</th>
+                <th className="text-left px-4 py-2.5 font-medium text-muted-foreground w-[40%]">Description</th>
+                <th className="text-left px-4 py-2.5 font-medium text-muted-foreground w-[12%]">Status</th>
+                <th className="text-right px-4 py-2.5 font-medium text-muted-foreground w-[8%]">Show</th>
               </tr>
             </thead>
             <tbody>
               {agents.map((agent) => {
-                const enabled = isDemoEnabled(agent);
-                const busy = toggling.has(agent.id);
+                const on = enabled.has(agent.id);
                 return (
                   <tr key={agent.id} className="border-b last:border-0 bg-input-bg hover:bg-input-bg/80">
-                    <td className="px-4 py-3">
-                      <div className="font-medium truncate">{agent.name ?? agent.runtime_id ?? `Agent ${agent.id}`}</div>
-                      {agent.description && (
-                        <div className="text-xs text-muted-foreground truncate mt-0.5">{agent.description}</div>
-                      )}
-                    </td>
+                    <td className="px-4 py-3 font-medium truncate">{agent.name ?? agent.runtime_id ?? `Agent ${agent.id}`}</td>
+                    <td className="px-4 py-3 text-xs text-muted-foreground truncate">{agent.description ?? "—"}</td>
                     <td className="px-4 py-3 text-muted-foreground text-xs">{agent.deployment_status ?? "—"}</td>
                     <td className="px-4 py-3 text-right">
                       <button
                         type="button"
-                        disabled={busy}
-                        onClick={() => void handleToggle(agent, !enabled)}
+                        onClick={() => toggle(agent.id)}
                         className={[
                           "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
                           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                          "disabled:cursor-not-allowed disabled:opacity-50",
-                          enabled ? "bg-primary" : "bg-input",
+                          on ? "bg-primary" : "bg-muted-foreground/30",
                         ].join(" ")}
                         role="switch"
-                        aria-checked={enabled}
+                        aria-checked={on}
                       >
-                        <span
-                          className={[
-                            "pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform",
-                            enabled ? "translate-x-4" : "translate-x-0",
-                          ].join(" ")}
-                        />
+                        <span className={[
+                          "pointer-events-none block h-4 w-4 rounded-full bg-white shadow-lg ring-0 transition-transform",
+                          on ? "translate-x-4" : "translate-x-0",
+                        ].join(" ")} />
                       </button>
                     </td>
                   </tr>
@@ -99,7 +112,7 @@ export function DemoConfigPage({ agents, loading, onRefreshAgent }: DemoConfigPa
       </div>
 
       <p className="text-xs text-muted-foreground">
-        {agents.filter(isDemoEnabled).length} of {agents.length} agent{agents.length !== 1 ? "s" : ""} enabled for demo.
+        {enabled.size} of {agents.length} agent{agents.length !== 1 ? "s" : ""} shown.
       </p>
     </div>
   );

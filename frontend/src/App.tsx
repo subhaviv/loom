@@ -27,19 +27,16 @@ import { InvocationDetailPage } from "@/pages/InvocationDetailPage";
 import { SecurityAdminPage } from "@/pages/SecurityAdminPage";
 import { MemoryManagementPage } from "@/pages/MemoryManagementPage";
 import { SettingsPage } from "@/pages/SettingsPage";
-import { IntegrationsPage } from "@/pages/IntegrationsPage";
 import { SkillsPage } from "@/pages/SkillsPage";
 import type { SessionResponse, InvocationResponse } from "@/api/types";
 import { getRegistryConfig } from "@/api/settings";
 import { listRegistryRecords } from "@/api/registry";
 import { listMemories } from "@/api/memories";
-import { listMcpServers } from "@/api/mcp";
-import { listA2aAgents } from "@/api/a2a";
 import { AuthProvider, useAuth, GROUP_SCOPES, type Scope } from "@/contexts/AuthContext";
 import { LoginPage } from "@/pages/LoginPage";
-import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Sun, Moon, Puzzle, Presentation } from "lucide-react";
+import { BookOpen, Shield, Bot, Brain, LogOut, User, Settings, Eye, BarChart3, Sun, Moon, Puzzle, Presentation } from "lucide-react";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
-import { DemoConfigPage } from "./pages/DemoConfigPage";
+import { DemoConfigPage, loadDemoVisibility } from "./pages/DemoConfigPage";
 import { ChatPage } from "./pages/ChatPage";
 import { OAuthLinkCallbackPage } from "./pages/OAuthLinkCallbackPage";
 import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
@@ -199,10 +196,7 @@ function AppContent() {
   const [activePersona, setActivePersona] = useState<Persona>(getDefaultPersona());
   const [agentInitialTab, setAgentInitialTab] = useState<"details" | "invoke">("details");
   const [viewAsUser, setViewAsUser] = useState<string | null>(null);
-  const [pendingMcpId, setPendingMcpId] = useState<number | null>(null);
-  const [pendingA2aId, setPendingA2aId] = useState<number | null>(null);
   const [pendingSkillId, setPendingSkillId] = useState<string | null>(null);
-  const [integrationsTab, setIntegrationsTab] = useState<"mcp" | "a2a">("mcp");
 
   // Reset all navigation state when user logs in (skip if returning from link callback)
   const hasResetForSession = useRef(false);
@@ -303,7 +297,14 @@ function AppContent() {
       ? `demo-user-${_demoAdminMatch[1]}`
       : undefined;
 
-  const { agents, loading, deleteStartTimes, updateStartTimes, fetchAgents, registerAgent, deployAgent, deployHarnessAgent, redeployAgent, refreshAgent, patchAgent, deleteAgent } = useAgents();
+  const { agents, loading, deleteStartTimes, updateStartTimes, fetchAgents, registerAgent, redeployAgent, refreshAgent, patchAgent, deleteAgent } = useAgents();
+
+  // Per-user demo visibility — reactive state so toggling on Demo page immediately
+  // updates Catalog/Agents without a page reload.
+  const [demoEnabledIds, setDemoEnabledIds] = useState<Set<number>>(
+    () => loadDemoVisibility(user?.username ?? user?.sub ?? "anonymous")
+  );
+  const demoFilteredAgents = demoEnabledIds.size === 0 ? agents : agents.filter(a => demoEnabledIds.has(a.id));
 
   // Re-fetch agents after authentication completes and when navigating to agent tabs
   useEffect(() => {
@@ -313,10 +314,6 @@ function AppContent() {
   useEffect(() => {
     if (isAuthenticated && (activePersona === "catalog" || activePersona === "builder")) {
       void fetchAgents();
-    }
-    if (activePersona !== "integrations") {
-      setPendingMcpId(null);
-      setPendingA2aId(null);
     }
     if (activePersona !== "skills") {
       setPendingSkillId(null);
@@ -330,22 +327,10 @@ function AppContent() {
 
   // Sidebar counts for Memory and Integrations (Agents already gets its count from `agents`).
   const [memoryCount, setMemoryCount] = useState(0);
-  const [mcpCount, setMcpCount] = useState(0);
-  const [a2aCount, setA2aCount] = useState(0);
   const [skillsCount, setSkillsCount] = useState(0);
   useEffect(() => {
     if (isAuthenticated && effectiveHasScope("memory:read")) {
       void listMemories().then((data) => setMemoryCount(data.length)).catch(() => {});
-    }
-  }, [isAuthenticated, effectiveHasScope]);
-  useEffect(() => {
-    if (isAuthenticated && effectiveHasScope("mcp:read")) {
-      void listMcpServers().then((data) => setMcpCount(data.length)).catch(() => {});
-    }
-  }, [isAuthenticated, effectiveHasScope]);
-  useEffect(() => {
-    if (isAuthenticated && effectiveHasScope("a2a:read")) {
-      void listA2aAgents().then((data) => setA2aCount(data.length)).catch(() => {});
     }
   }, [isAuthenticated, effectiveHasScope]);
   useEffect(() => {
@@ -360,8 +345,6 @@ function AppContent() {
   const [catalogViewMode, setCatalogViewMode] = useState<ViewMode>("cards");
   const [agentsViewMode, setAgentsViewMode] = useState<ViewMode>("cards");
   const [memoryViewMode, setMemoryViewMode] = useState<ViewMode>("cards");
-  const [mcpViewMode, setMcpViewMode] = useState<ViewMode>("cards");
-  const [a2aViewMode, setA2aViewMode] = useState<ViewMode>("cards");
   const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sessionDetail, setSessionDetail] = useState<SessionResponse | null>(null);
@@ -570,15 +553,6 @@ function AppContent() {
                 count={memoryCount}
               />
             )}
-            {(effectiveHasScope("mcp:read") || effectiveHasScope("mcp:write") || effectiveHasScope("a2a:read") || effectiveHasScope("a2a:write")) && (
-              <SidebarItem
-                icon={Network}
-                label={t("nav.integrations")}
-                active={activePersona === "integrations"}
-                onClick={() => setActivePersona("integrations")}
-                count={mcpCount + a2aCount}
-              />
-            )}
             {effectiveHasScope("registry:read") && (
               <SidebarItem
                 icon={Puzzle}
@@ -606,14 +580,12 @@ function AppContent() {
                 onClick={() => setActivePersona("admin")}
               />
             )}
-            {isAdmin && (
-              <SidebarItem
-                icon={Presentation}
-                label="Demo"
-                active={activePersona === "demo"}
-                onClick={() => setActivePersona("demo")}
-              />
-            )}
+            <SidebarItem
+              icon={Presentation}
+              label="Demo"
+              active={activePersona === "demo"}
+              onClick={() => setActivePersona("demo")}
+            />
           </SidebarSection>
           <SidebarSection label={t("nav.sections.system")}>
             {(effectiveHasScope("tagging:read") || effectiveHasScope("tagging:write")) && (
@@ -718,7 +690,7 @@ function AppContent() {
         <main className="max-w-7xl px-8 py-6 flex-1 w-full">
           {activePersona === "catalog" && (
             <CatalogPage
-              agents={agents}
+              agents={demoFilteredAgents}
               loading={loading}
               viewMode={catalogViewMode}
               onViewModeChange={setCatalogViewMode}
@@ -734,8 +706,6 @@ function AppContent() {
               canViewSkills={effectiveHasScope("registry:read")}
               groupRestriction={groupRestriction}
               userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])}
-              onNavigateToMcp={(serverId) => { setPendingMcpId(serverId); setIntegrationsTab("mcp"); setActivePersona("integrations"); }}
-              onNavigateToA2a={(agentId) => { setPendingA2aId(agentId); setIntegrationsTab("a2a"); setActivePersona("integrations"); }}
               onNavigateToSkill={(recordId) => { setPendingSkillId(recordId); setActivePersona("skills"); }}
             />
           )}
@@ -744,13 +714,11 @@ function AppContent() {
             <>
               {selectedAgentId === null && (
                 <AgentListPage
-                  agents={agents}
+                  agents={demoFilteredAgents}
                   loading={loading}
                   viewMode={agentsViewMode}
                   onViewModeChange={setAgentsViewMode}
                   onRegister={registerAgent}
-                  onDeploy={deployAgent}
-                  onDeployHarness={deployHarnessAgent}
                   onSelectAgent={handleSelectAgent}
                   onRefreshAgent={refreshAgent}
                   onDelete={handleDelete}
@@ -827,23 +795,6 @@ function AppContent() {
 
           {activePersona === "security" && <SecurityAdminPage readOnly={!effectiveHasScope("security:write")} agents={agents} />}
           {activePersona === "memory" && <MemoryManagementPage viewMode={memoryViewMode} onViewModeChange={setMemoryViewMode} readOnly={!effectiveHasScope("memory:write")} groupRestriction={groupRestriction} ownerRestriction={ownerRestriction} userGroups={viewAsUser ? (USER_GROUPS[viewAsUser] ?? []) : (user?.groups ?? [])} />}
-          {activePersona === "integrations" && (
-            <IntegrationsPage
-              canViewMcp={effectiveHasScope("mcp:read")}
-              canViewA2a={effectiveHasScope("a2a:read")}
-              canEditMcp={effectiveHasScope("mcp:write")}
-              canEditA2a={effectiveHasScope("a2a:write")}
-              activeTab={integrationsTab}
-              onActiveTabChange={setIntegrationsTab}
-              mcpViewMode={mcpViewMode}
-              onMcpViewModeChange={setMcpViewMode}
-              a2aViewMode={a2aViewMode}
-              onA2aViewModeChange={setA2aViewMode}
-              pendingMcpId={pendingMcpId}
-              pendingA2aId={pendingA2aId}
-              agents={agents}
-            />
-          )}
           {activePersona === "skills" && (
             <SkillsPage key={`skill-${pendingSkillId ?? "none"}`} initialSelectedId={pendingSkillId} />
           )}
@@ -859,7 +810,7 @@ function AppContent() {
             <DemoConfigPage
               agents={agents}
               loading={loading}
-              onRefreshAgent={refreshAgent}
+              onVisibilityChange={setDemoEnabledIds}
             />
           )}
           {activePersona === "admin" && (
