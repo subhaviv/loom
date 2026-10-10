@@ -153,6 +153,7 @@ export function patchAgent(
     provider?: string;
     base_url?: string;
     api_key?: string;
+    tags?: Record<string, string>;
   },
 ): Promise<AgentResponse> {
   return apiFetch<AgentResponse>(`/api/agents/${id}`, {

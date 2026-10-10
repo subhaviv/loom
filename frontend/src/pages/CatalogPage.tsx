@@ -235,7 +235,9 @@ export function CatalogPage({
       setSkillsTableDir("asc");
     }
   };
+  const isAdmin = userGroups.includes("t-admin");
   const filteredAgents = agents
+    .filter(agent => isAdmin || agent.tags?.["loom:demo"] === "true")
     .filter(agent => matchesFilters(agent.tags))
     .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction)
     .filter(agent => matchesSearch(agent.name ?? agent.runtime_id ?? ""));

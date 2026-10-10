@@ -37,8 +37,9 @@ import { listMcpServers } from "@/api/mcp";
 import { listA2aAgents } from "@/api/a2a";
 import { AuthProvider, useAuth, GROUP_SCOPES, type Scope } from "@/contexts/AuthContext";
 import { LoginPage } from "@/pages/LoginPage";
-import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Sun, Moon, Puzzle } from "lucide-react";
+import { BookOpen, Shield, Bot, Brain, Network, LogOut, User, Settings, Eye, BarChart3, Sun, Moon, Puzzle, Presentation } from "lucide-react";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
+import { DemoConfigPage } from "./pages/DemoConfigPage";
 import { ChatPage } from "./pages/ChatPage";
 import { OAuthLinkCallbackPage } from "./pages/OAuthLinkCallbackPage";
 import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
@@ -67,7 +68,7 @@ import { recordPageView, sendBeaconPageView, trackAction } from "./api/audit";
 //     this is also a no-op for current groups)
 //   - Catalog > Registry section: visible iff registry:read; editable iff
 //     registry:write (unchanged from the standalone Registry page's gate)
-type Persona = "catalog" | "security" | "builder" | "memory" | "integrations" | "skills" | "settings" | "admin";
+type Persona = "catalog" | "security" | "builder" | "memory" | "integrations" | "skills" | "settings" | "admin" | "demo";
 
 const USER_GROUPS: Record<string, string[]> = {
   "admin": ["t-admin", "g-admins-super"],
@@ -605,6 +606,14 @@ function AppContent() {
                 onClick={() => setActivePersona("admin")}
               />
             )}
+            {isAdmin && (
+              <SidebarItem
+                icon={Presentation}
+                label="Demo"
+                active={activePersona === "demo"}
+                onClick={() => setActivePersona("demo")}
+              />
+            )}
           </SidebarSection>
           <SidebarSection label={t("nav.sections.system")}>
             {(effectiveHasScope("tagging:read") || effectiveHasScope("tagging:write")) && (
@@ -844,6 +853,13 @@ function AppContent() {
               canEditTagging={effectiveHasScope("tagging:write")}
               userGroups={user?.groups || []}
               agents={agents}
+            />
+          )}
+          {activePersona === "demo" && (
+            <DemoConfigPage
+              agents={agents}
+              loading={loading}
+              onRefreshAgent={refreshAgent}
             />
           )}
           {activePersona === "admin" && (

@@ -127,6 +127,12 @@ export function AgentListPage({
       });
     })
     .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction)
+    .filter(agent => {
+      // Non-admin users only see agents explicitly enabled for demo.
+      const isAdmin = userGroups.includes("t-admin");
+      if (isAdmin) return true;
+      return agent.tags?.["loom:demo"] === "true";
+    })
     .filter(agent => nameSearch.trim() === "" || (agent.name ?? agent.runtime_id ?? "").toLowerCase().includes(nameSearch.trim().toLowerCase()));
   const maxAgentCost = Math.max(0, ...filteredAgents.map(a => a.cost_summary?.total_cost ?? 0));
 

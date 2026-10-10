@@ -272,6 +272,7 @@ class AgentUpdateRequest(BaseModel):
     provider: str | None = None
     base_url: str | None = None
     api_key: str | None = Field(None, description="Provider API key, write-only — stored in Secrets Manager and never returned")
+    tags: dict[str, str] | None = Field(None, description="Tag key/value pairs to merge onto the agent")
 
 
 class RegistryAgentImportRequest(BaseModel):
@@ -4756,6 +4757,8 @@ def patch_agent(
                 except (json.JSONDecodeError, TypeError):
                     pass
                 break
+    if "tags" in request.model_fields_set and request.tags is not None:
+        agent.set_tags({**agent.get_tags(), **request.tags})
     db.commit()
     db.refresh(agent)
     return _agent_response(agent, db)
