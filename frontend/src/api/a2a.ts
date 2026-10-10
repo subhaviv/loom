@@ -85,3 +85,30 @@ export function updateAgentAccess(agentId: number, request: A2aAccessUpdateReque
 export function exportA2aAgent(agentId: number): Promise<Record<string, unknown>> {
   return apiFetch<Record<string, unknown>>(`/api/a2a/agents/${agentId}/export`);
 }
+
+export interface RegistryA2aImportRequest {
+  registry_record_id: string;
+  base_url: string;
+  name?: string | null;
+  tags?: Record<string, string> | null;
+}
+
+export interface RegistryReconcileResult {
+  checked: number;
+  updated: number;
+  missing: number;
+  details: string[];
+}
+
+export function importRegistryA2a(request: RegistryA2aImportRequest): Promise<A2aAgent> {
+  return apiFetch<A2aAgent>("/api/a2a/agents/import-registry", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export function reconcileRegistryA2a(): Promise<RegistryReconcileResult> {
+  return apiFetch<RegistryReconcileResult>("/api/a2a/agents/reconcile-registry", {
+    method: "POST",
+  });
+}

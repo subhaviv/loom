@@ -24,13 +24,14 @@ import { useTimezone } from "@/contexts/TimezoneContext";
 import { formatTimestamp } from "@/lib/format";
 import { statusVariant, statusDotClass, type BadgeVariant } from "@/lib/status";
 import { listMemories, refreshMemory, deleteMemory, purgeMemory } from "@/api/memories";
-import { listMcpServers } from "@/api/mcp";
-import { listA2aAgents } from "@/api/a2a";
+import { listMcpServers, importRegistryMcp, reconcileRegistryMcp } from "@/api/mcp";
+import { listA2aAgents, importRegistryA2a, reconcileRegistryA2a } from "@/api/a2a";
 import { listTagPolicies, getRegistryConfig } from "@/api/settings";
-import { listRegistryRecords } from "@/api/registry";
+import { listRegistryRecords, getRegistryRecord } from "@/api/registry";
 import { fetchModels, importRegistryAgent, reconcileRegistryAgents } from "@/api/agents";
 import { ApiError } from "@/api/client";
 import { RegistryStatusBadge } from "@/components/RegistryStatusBadge";
+import { RegistryActions } from "@/components/RegistryActions";
 import type { AgentResponse, MemoryResponse, McpServer, A2aAgent, TagPolicy, RegistryRecord, ModelOption } from "@/api/types";
 
 function mcpHealth(status: McpServer["status"]): { label: string; variant: BadgeVariant } {
@@ -235,9 +236,7 @@ export function CatalogPage({
       setSkillsTableDir("asc");
     }
   };
-  const isAdmin = userGroups.includes("t-admin");
   const filteredAgents = agents
-    .filter(agent => isAdmin || agent.tags?.["loom:demo"] === "true")
     .filter(agent => matchesFilters(agent.tags))
     .filter(agent => !groupRestriction || agent.tags?.["loom:group"] === groupRestriction)
     .filter(agent => matchesSearch(agent.name ?? agent.runtime_id ?? ""));
@@ -336,8 +335,7 @@ export function CatalogPage({
     void fetchToolsData();
   }, [fetchToolsData]);
 
-  // Registry Agents (AGENT records of the bound registry) — catalog view that
-  // supports importing into Loom's DB via an inline metadata form.
+  // Registry Agents (AGENT/A2A records of the bound registry)
   const [registryAgents, setRegistryAgents] = useState<RegistryRecord[]>([]);
   const [registryAgentsLoading, setRegistryAgentsLoading] = useState(true);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
@@ -348,16 +346,33 @@ export function CatalogPage({
   const [importing, setImporting] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
+  // Registry MCP (MCP records of the bound registry)
+  const [registryMcp, setRegistryMcp] = useState<RegistryRecord[]>([]);
+  const [registryMcpLoading, setRegistryMcpLoading] = useState(true);
+  const [editingMcpId, setEditingMcpId] = useState<string | null>(null);
+  const [editMcpName, setEditMcpName] = useState("");
+  const [editMcpDescription, setEditMcpDescription] = useState("");
+  const [editMcpUrl, setEditMcpUrl] = useState("");
+  const [editMcpTransport, setEditMcpTransport] = useState("streamable_http");
+  const [importingMcp, setImportingMcp] = useState(false);
+
   const handleSyncRegistry = async () => {
     setSyncing(true);
     try {
-      const r = await reconcileRegistryAgents();
-      if (r.updated === 0 && r.missing === 0) {
-        toast.success(`In sync — ${r.checked} imported agent(s) checked, nothing changed`);
+      const [ra, rm, ra2a] = await Promise.allSettled([
+        reconcileRegistryAgents(),
+        reconcileRegistryMcp(),
+        reconcileRegistryA2a(),
+      ]);
+      const totalChecked = [ra, rm, ra2a].reduce((sum, r) => sum + (r.status === "fulfilled" ? r.value.checked : 0), 0);
+      const totalUpdated = [ra, rm, ra2a].reduce((sum, r) => sum + (r.status === "fulfilled" ? r.value.updated : 0), 0);
+      const totalMissing = [ra, rm, ra2a].reduce((sum, r) => sum + (r.status === "fulfilled" ? r.value.missing : 0), 0);
+      if (totalUpdated === 0 && totalMissing === 0) {
+        toast.success(`In sync — ${totalChecked} imported asset(s) checked, nothing changed`);
       } else {
-        toast.success(`Synced: ${r.updated} updated, ${r.missing} missing, ${r.checked} checked`);
+        toast.success(`Synced: ${totalUpdated} updated, ${totalMissing} missing, ${totalChecked} checked`);
       }
-      await fetchRegistryAgents();
+      await Promise.all([fetchRegistryAgents(), fetchRegistryMcp()]);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : "Registry sync failed");
     } finally {
@@ -380,17 +395,33 @@ export function CatalogPage({
     }
   }, [registryEnabled]);
 
+  const fetchRegistryMcp = useCallback(async () => {
+    if (!registryEnabled) {
+      setRegistryMcpLoading(false);
+      return;
+    }
+    try {
+      const data = await listRegistryRecords({ descriptorType: "MCP" });
+      setRegistryMcp(data);
+    } catch {
+      // silently ignore
+    } finally {
+      setRegistryMcpLoading(false);
+    }
+  }, [registryEnabled]);
+
   useEffect(() => {
     void fetchRegistryAgents();
   }, [fetchRegistryAgents]);
+
+  useEffect(() => {
+    void fetchRegistryMcp();
+  }, [fetchRegistryMcp]);
 
   const startEditAgent = (rec: RegistryRecord) => {
     setEditingAgentId(rec.record_id);
     setEditName(rec.name);
     setEditDescription(rec.description ?? "");
-    // The list record carries no runtime ARN (it lives in the detail
-    // descriptors); the user pastes the deployed AgentCore Runtime ARN here to
-    // make the imported agent invokable, else it imports as a draft.
     setEditArn("");
     setEditRegion("");
   };
@@ -398,14 +429,41 @@ export function CatalogPage({
   const saveImportAgent = async (rec: RegistryRecord) => {
     setImporting(true);
     try {
-      await importRegistryAgent({
-        registry_record_id: rec.record_id,
-        name: editName.trim() || rec.name,
-        description: editDescription,
-        arn: editArn.trim() || null,
-        region: editRegion.trim() || null,
-      });
-      toast.success(`Imported "${editName.trim() || rec.name}" into Loom`);
+      // Fetch registry detail to auto-extract the base_url from a2aAgentCard descriptor
+      let baseUrl: string | null = null;
+      try {
+        const detail = await getRegistryRecord(rec.record_id);
+        const agentDescriptor = detail.descriptors["agent"] as Record<string, unknown> | undefined;
+        const cardData = agentDescriptor?.["data"];
+        if (typeof cardData === "string") {
+          const parsed = JSON.parse(cardData) as Record<string, unknown>;
+          baseUrl = (parsed["url"] ?? parsed["base_url"] ?? null) as string | null;
+        } else if (typeof cardData === "object" && cardData !== null) {
+          const c = cardData as Record<string, unknown>;
+          baseUrl = (c["url"] ?? c["base_url"] ?? null) as string | null;
+        }
+      } catch {
+        // If detail fetch fails, fall through to agent import without URL
+      }
+
+      if (baseUrl) {
+        // Has an A2A agent card URL — import as A2aAgent
+        await importRegistryA2a({
+          registry_record_id: rec.record_id,
+          base_url: baseUrl,
+          name: editName.trim() || rec.name,
+        });
+      } else {
+        // No A2A card URL — import as a registry-sourced Agent (with optional ARN)
+        await importRegistryAgent({
+          registry_record_id: rec.record_id,
+          name: editName.trim() || rec.name,
+          description: editDescription,
+          arn: editArn.trim() || null,
+          region: editRegion.trim() || null,
+        });
+      }
+      toast.success(`Imported "${editName.trim() || rec.name}" into Calanthir`);
       setEditingAgentId(null);
       await fetchRegistryAgents();
     } catch (e) {
@@ -414,6 +472,35 @@ export function CatalogPage({
       setImporting(false);
     }
   };
+
+  const startEditMcp = (rec: RegistryRecord) => {
+    setEditingMcpId(rec.record_id);
+    setEditMcpName(rec.name);
+    setEditMcpDescription(rec.description ?? "");
+    setEditMcpUrl("");
+    setEditMcpTransport("streamable_http");
+  };
+
+  const saveImportMcp = async (rec: RegistryRecord) => {
+    setImportingMcp(true);
+    try {
+      await importRegistryMcp({
+        registry_record_id: rec.record_id,
+        name: editMcpName.trim() || rec.name,
+        description: editMcpDescription || null,
+        endpoint_url: editMcpUrl.trim(),
+        transport_type: editMcpTransport,
+      });
+      toast.success(`Imported "${editMcpName.trim() || rec.name}" into Calanthir`);
+      setEditingMcpId(null);
+      await fetchRegistryMcp();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Failed to import MCP server");
+    } finally {
+      setImportingMcp(false);
+    }
+  };
+
 
   // Memory data
   const [memories, setMemories] = useState<MemoryResponse[]>([]);
@@ -1309,6 +1396,102 @@ export function CatalogPage({
       </section>
       )}
 
+      {/* Registry MCP Section (MCP records of the bound registry; import into DB) */}
+      {registryEnabled && (
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <button type="button" className="flex items-center gap-1 text-sm font-medium hover:text-foreground/80" onClick={() => toggleSection("registry-mcp")}>
+            {collapsedSections.has("registry-mcp") ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            Registry MCP Servers
+          </button>
+        </div>
+
+        {!collapsedSections.has("registry-mcp") && (registryMcpLoading ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 2 }).map((_, i) => (
+              <Skeleton key={i} className="h-32" />
+            ))}
+          </div>
+        ) : registryMcp.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-8 text-center">
+            No MCP servers published to the registry.
+          </p>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {registryMcp.map((rec) => (
+              <Card key={rec.record_id} className="group relative flex h-full flex-col gap-3.5 py-4">
+                <CardHeader className="gap-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="min-w-0 flex-1 truncate font-mono text-sm font-medium tracking-tight" title={rec.name}>
+                      {rec.name}
+                    </CardTitle>
+                    <RegistryStatusBadge status={rec.status} />
+                  </div>
+                  {rec.status === "PENDING_APPROVAL" && (
+                    <RegistryActions
+                      resourceType="mcp"
+                      resourceId={rec.db_mcp_id ?? 0}
+                      registryRecordId={rec.record_id}
+                      registryStatus={rec.status}
+                      onAction={() => void fetchRegistryMcp()}
+                    />
+                  )}
+                </CardHeader>
+                <CardContent className="flex flex-1 flex-col gap-3.5">
+                  {editingMcpId === rec.record_id ? (
+                    <div className="flex flex-col gap-2">
+                      <Input value={editMcpName} onChange={(e) => setEditMcpName(e.target.value)} placeholder="Server name" />
+                      <Input value={editMcpDescription} onChange={(e) => setEditMcpDescription(e.target.value)} placeholder="Description" />
+                      <Input value={editMcpUrl} onChange={(e) => setEditMcpUrl(e.target.value)} placeholder="Endpoint URL (required)" className="font-mono text-xs" />
+                      <select
+                        value={editMcpTransport}
+                        onChange={(e) => setEditMcpTransport(e.target.value)}
+                        className="h-8 rounded border bg-input-bg px-2 text-xs"
+                      >
+                        <option value="streamable_http">Streamable HTTP</option>
+                        <option value="sse">SSE</option>
+                      </select>
+                      <div className="flex items-center gap-2 pt-1">
+                        <Button size="sm" disabled={importingMcp || !editMcpUrl.trim()} onClick={() => void saveImportMcp(rec)}>
+                          {importingMcp ? "Saving…" : "Save to Calanthir"}
+                        </Button>
+                        <Button size="sm" variant="ghost" disabled={importingMcp} onClick={() => setEditingMcpId(null)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs text-muted-foreground line-clamp-3">{rec.description ?? "No description."}</p>
+                      <div className="flex items-center gap-1.5">
+                        {rec.imported ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                            ✓ Imported into Calanthir
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                            Not in Calanthir
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3 text-[11px] text-muted-foreground">
+                        <span>Updated {formatTimestamp(rec.updated_at, timezone)}</span>
+                        {rec.imported ? (
+                          <Button size="sm" variant="ghost" disabled>Imported</Button>
+                        ) : (
+                          <Button size="sm" variant="outline" onClick={() => startEditMcp(rec)}>Import</Button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        ))}
+      </section>
+      )}
+
       {/* Registry Agents Section (AGENT records of the bound registry; import into DB) */}
       {registryEnabled && (
       <section className="space-y-3">
@@ -1343,6 +1526,15 @@ export function CatalogPage({
                     </CardTitle>
                     <RegistryStatusBadge status={rec.status} />
                   </div>
+                  {rec.status === "PENDING_APPROVAL" && (
+                    <RegistryActions
+                      resourceType="a2a"
+                      resourceId={rec.db_a2a_id ?? rec.db_agent_id ?? 0}
+                      registryRecordId={rec.record_id}
+                      registryStatus={rec.status}
+                      onAction={() => void fetchRegistryAgents()}
+                    />
+                  )}
                 </CardHeader>
                 <CardContent className="flex flex-1 flex-col gap-3.5">
                   {editingAgentId === rec.record_id ? (

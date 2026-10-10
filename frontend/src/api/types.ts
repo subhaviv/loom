@@ -1085,6 +1085,8 @@ export interface RegistryRecord {
   record_version: string | null;
   imported?: boolean;
   db_agent_id?: number | null;
+  db_mcp_id?: number | null;
+  db_a2a_id?: number | null;
 }
 
 export interface RegistryRecordDetail extends RegistryRecord {

@@ -48,12 +48,12 @@ class RegistryRecordResponse(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
     record_version: str | None = None
-    # Whether a corresponding Loom DB agent row exists (keyed on
-    # registry_record_id). Populated for AGENT records so the catalog can show
-    # an "Imported" badge vs an "Import" button. None/False means not yet
-    # imported into Loom's operational store.
+    # Whether a corresponding Loom DB row exists for this record type.
+    # Populated by list_records so the catalog can show "Imported" badges.
     imported: bool = False
     db_agent_id: int | None = None
+    db_mcp_id: int | None = None
+    db_a2a_id: int | None = None
 
 
 class RegistryRecordDetailResponse(RegistryRecordResponse):
@@ -254,13 +254,25 @@ def list_records(
     response = _call_registry(client.list_records)
     records = response.get("registryRecords", [])
 
-    # Map registry_record_id -> DB agent id so each record can indicate whether
-    # it has a corresponding Loom operational row (the registry is the source of
-    # truth for "what exists"; the DB is the operational cache for "is it here").
-    imported_map: dict[str, int] = {
+    # Map registry_record_id -> DB row id for agents, MCP servers, and A2A agents
+    agent_map: dict[str, int] = {
         rid: aid
         for rid, aid in db.query(Agent.registry_record_id, Agent.id)
         .filter(Agent.registry_record_id.isnot(None))
+        .all()
+        if rid
+    }
+    mcp_map: dict[str, int] = {
+        rid: sid
+        for rid, sid in db.query(McpServer.registry_record_id, McpServer.id)
+        .filter(McpServer.registry_record_id.isnot(None))
+        .all()
+        if rid
+    }
+    a2a_map: dict[str, int] = {
+        rid: aid
+        for rid, aid in db.query(A2aAgent.registry_record_id, A2aAgent.id)
+        .filter(A2aAgent.registry_record_id.isnot(None))
         .all()
         if rid
     }
@@ -272,10 +284,15 @@ def list_records(
         if descriptor_type and _from_record_type(rec.get("recordType", "")) != descriptor_type:
             continue
         resp = _record_to_response(rec)
-        db_id = imported_map.get(resp.record_id)
-        if db_id is not None:
+        if (agent_id := agent_map.get(resp.record_id)) is not None:
             resp.imported = True
-            resp.db_agent_id = db_id
+            resp.db_agent_id = agent_id
+        elif (mcp_id := mcp_map.get(resp.record_id)) is not None:
+            resp.imported = True
+            resp.db_mcp_id = mcp_id
+        elif (a2a_id := a2a_map.get(resp.record_id)) is not None:
+            resp.imported = True
+            resp.db_a2a_id = a2a_id
         results.append(resp)
     return results
 

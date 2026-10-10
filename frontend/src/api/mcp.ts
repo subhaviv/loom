@@ -113,3 +113,32 @@ export function getUserApiKeyStatus(serverId: number): Promise<{ has_user_api_ke
 export function deleteUserApiKey(serverId: number): Promise<{ has_user_api_key: boolean }> {
   return apiFetch(`/api/mcp/servers/${serverId}/api-key`, { method: "DELETE" });
 }
+
+export interface RegistryMcpImportRequest {
+  registry_record_id: string;
+  name: string;
+  description?: string | null;
+  endpoint_url: string;
+  transport_type?: string;
+  tags?: Record<string, string> | null;
+}
+
+export interface RegistryReconcileResult {
+  checked: number;
+  updated: number;
+  missing: number;
+  details: string[];
+}
+
+export function importRegistryMcp(request: RegistryMcpImportRequest): Promise<McpServer> {
+  return apiFetch<McpServer>("/api/mcp/servers/import-registry", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export function reconcileRegistryMcp(): Promise<RegistryReconcileResult> {
+  return apiFetch<RegistryReconcileResult>("/api/mcp/servers/reconcile-registry", {
+    method: "POST",
+  });
+}

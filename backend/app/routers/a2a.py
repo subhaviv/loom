@@ -519,3 +519,130 @@ def export_a2a_agent(
         data["oauth2_scopes"] = agent.oauth2_scopes
         data["delegation_mode"] = agent.delegation_mode
     return data
+
+
+# ---------------------------------------------------------------------------
+# Registry import / reconcile
+# ---------------------------------------------------------------------------
+class RegistryA2aImportRequest(BaseModel):
+    """Import (upsert) a registry A2A record into Loom's DB."""
+    registry_record_id: str = Field(..., description="Registry record id")
+    base_url: str = Field(..., description="A2A agent base URL (from a2aAgentCard.url)")
+    name: str | None = Field(None, description="Display name override")
+    tags: dict[str, str] | None = Field(None, description="Resolved tag values (must include loom:group)")
+
+
+class RegistryReconcileResponse(BaseModel):
+    checked: int = 0
+    updated: int = 0
+    missing: int = 0
+    details: list[str] = Field(default_factory=list)
+
+
+@router.post("/import-registry", response_model=A2aAgentResponse, status_code=status.HTTP_201_CREATED)
+def import_registry_a2a(
+    request: RegistryA2aImportRequest,
+    user: UserInfo = Depends(require_scopes("a2a:write")),
+    db: Session = Depends(get_db),
+) -> A2aAgentResponse:
+    """Upsert a registry A2A record into Loom's DB. Fetches the agent card to populate fields."""
+    existing = (
+        db.query(A2aAgent)
+        .filter(A2aAgent.registry_record_id == request.registry_record_id)
+        .first()
+    )
+    created = existing is None
+
+    try:
+        card = fetch_agent_card(request.base_url)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    parsed = parse_agent_card(card)
+    if existing is None:
+        agent = A2aAgent(
+            base_url=request.base_url,
+            name=request.name or parsed["name"],
+            auth_type="none",
+            delegation_mode="m2m",
+            agentcore_session_id=str(uuid.uuid4()) if _is_agentcore_url(request.base_url) else None,
+        )
+        if request.tags:
+            agent.set_tags(request.tags)
+        db.add(agent)
+        db.flush()
+    else:
+        agent = existing
+        agent.base_url = request.base_url
+        if request.name:
+            agent.name = request.name
+        if request.tags is not None:
+            agent.set_tags(request.tags)
+
+    _apply_card_to_agent(agent, card, parsed, preserve_name=bool(request.name or (existing and existing.name)))
+    _sync_skills(agent.id, card, db)
+
+    agent.registry_record_id = request.registry_record_id
+    agent.registry_status = "APPROVED"
+
+    db.commit()
+    db.refresh(agent)
+    logger.info(
+        "%s registry A2A import: record=%s id=%s",
+        "Created" if created else "Updated",
+        request.registry_record_id, agent.id,
+    )
+    return A2aAgentResponse(**agent.to_dict())
+
+
+@router.post("/reconcile-registry", response_model=RegistryReconcileResponse)
+def reconcile_registry_a2a(
+    user: UserInfo = Depends(require_scopes("a2a:write")),
+    db: Session = Depends(get_db),
+) -> RegistryReconcileResponse:
+    """Reconcile imported A2A agents against the registry (refresh name/description/status)."""
+    from app.services.registry import get_registry_client
+    from fastapi import HTTPException as _HTTPException
+
+    agents = (
+        db.query(A2aAgent)
+        .filter(A2aAgent.registry_record_id.isnot(None))
+        .all()
+    )
+    result = RegistryReconcileResponse(checked=len(agents))
+    if not agents:
+        return result
+
+    client = get_registry_client()
+    try:
+        resp = client.list_records()
+        records = {r.get("recordId") or r.get("registryRecordId"): r
+                   for r in resp.get("registryRecords", [])}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Registry list failed: {e}")
+
+    for agent in agents:
+        rec = records.get(agent.registry_record_id)
+        if rec is None:
+            if agent.registry_status != "MISSING":
+                agent.registry_status = "MISSING"
+                result.missing += 1
+                result.details.append(f"{agent.name}: registry record gone -> MISSING")
+            continue
+        changed = False
+        new_name = rec.get("name") or rec.get("displayName")
+        new_desc = rec.get("description")
+        new_status = rec.get("status")
+        if new_name and new_name != agent.name:
+            agent.name = new_name; changed = True
+        if new_desc is not None and new_desc != agent.description:
+            agent.description = new_desc or ""; changed = True
+        if new_status and new_status != agent.registry_status:
+            agent.registry_status = new_status; changed = True
+        if changed:
+            result.updated += 1
+            result.details.append(f"{agent.name}: refreshed from registry")
+
+    db.commit()
+    return result

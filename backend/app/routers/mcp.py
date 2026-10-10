@@ -746,3 +746,126 @@ def update_access_rules(
         db.refresh(r)
 
     return [McpAccessRuleResponse(**r.to_dict()) for r in new_rules]
+
+
+# ---------------------------------------------------------------------------
+# Registry import / reconcile
+# ---------------------------------------------------------------------------
+class RegistryMcpImportRequest(BaseModel):
+    """Import (upsert) a registry MCP record into Loom's DB."""
+    registry_record_id: str = Field(..., description="Registry record id")
+    name: str = Field(..., description="MCP server display name")
+    description: str | None = Field(None, description="Human-readable description")
+    endpoint_url: str = Field(..., description="MCP server endpoint URL")
+    transport_type: str = Field(default="streamable_http", description="Transport type: 'sse' or 'streamable_http'")
+    tags: dict[str, str] | None = Field(None, description="Resolved tag values (must include loom:group)")
+
+
+class RegistryReconcileResponse(BaseModel):
+    checked: int = 0
+    updated: int = 0
+    missing: int = 0
+    details: list[str] = Field(default_factory=list)
+
+
+@router.post("/import-registry", response_model=McpServerResponse, status_code=status.HTTP_201_CREATED)
+def import_registry_mcp(
+    request: RegistryMcpImportRequest,
+    user: UserInfo = Depends(require_scopes("mcp:write")),
+    db: Session = Depends(get_db),
+) -> McpServerResponse:
+    """Upsert a registry MCP record into Loom's DB. Keyed on registry_record_id."""
+    server = (
+        db.query(McpServer)
+        .filter(McpServer.registry_record_id == request.registry_record_id)
+        .first()
+    )
+    created = server is None
+
+    if server is None:
+        server = McpServer(
+            name=request.name,
+            description=request.description,
+            endpoint_url=request.endpoint_url,
+            transport_type=request.transport_type,
+            auth_type="none",
+            delegation_mode="m2m",
+        )
+        if request.tags:
+            server.set_tags(request.tags)
+        db.add(server)
+    else:
+        server.name = request.name
+        if request.description is not None:
+            server.description = request.description
+        server.endpoint_url = request.endpoint_url
+        server.transport_type = request.transport_type
+        if request.tags is not None:
+            server.set_tags(request.tags)
+
+    server.registry_record_id = request.registry_record_id
+    server.registry_status = "APPROVED"
+
+    db.commit()
+    db.refresh(server)
+    logger.info(
+        "%s registry MCP import: record=%s id=%s",
+        "Created" if created else "Updated",
+        request.registry_record_id, server.id,
+    )
+    return McpServerResponse(**server.to_dict())
+
+
+@router.post("/reconcile-registry", response_model=RegistryReconcileResponse)
+def reconcile_registry_mcp(
+    user: UserInfo = Depends(require_scopes("mcp:write")),
+    db: Session = Depends(get_db),
+) -> RegistryReconcileResponse:
+    """Reconcile imported MCP servers against the registry (refresh name/description/status)."""
+    from app.services.registry import get_registry_client
+
+    servers = (
+        db.query(McpServer)
+        .filter(McpServer.registry_record_id.isnot(None))
+        .all()
+    )
+    result = RegistryReconcileResponse(checked=len(servers))
+    if not servers:
+        return result
+
+    from fastapi import HTTPException as _HTTPException
+    from fastapi import status as _status
+    client = get_registry_client()
+    try:
+        resp = client.list_records()
+        records = {r.get("recordId") or r.get("registryRecordId"): r
+                   for r in resp.get("registryRecords", [])}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Registry list failed: {e}")
+
+    from datetime import datetime
+    for server in servers:
+        rec = records.get(server.registry_record_id)
+        if rec is None:
+            if server.registry_status != "MISSING":
+                server.registry_status = "MISSING"
+                result.missing += 1
+                result.details.append(f"{server.name}: registry record gone -> MISSING")
+            continue
+        changed = False
+        new_name = rec.get("name") or rec.get("displayName")
+        new_desc = rec.get("description")
+        new_status = rec.get("status")
+        if new_name and new_name != server.name:
+            server.name = new_name; changed = True
+        if new_desc is not None and new_desc != server.description:
+            server.description = new_desc or None; changed = True
+        if new_status and new_status != server.registry_status:
+            server.registry_status = new_status; changed = True
+        if changed:
+            result.updated += 1
+            result.details.append(f"{server.name}: refreshed from registry")
+
+    db.commit()
+    return result
